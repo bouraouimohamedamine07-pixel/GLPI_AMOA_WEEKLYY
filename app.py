@@ -917,7 +917,7 @@ if page == "Dashboard":
             filtered["Function"]
             .value_counts()
             .head(12)
-            horizontal=true
+            horizontal=True
         )
 
     with b:
