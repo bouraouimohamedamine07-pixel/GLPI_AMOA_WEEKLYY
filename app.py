@@ -1378,9 +1378,5 @@ elif page == "Référentiel / IA":
 # -----------------------------
 
 st.caption(
-    "Données affichées depuis la base locale du dashboard. "
-    "Le champ Technicien provient directement de "
-    "« Attribué à - Technicien » dans l'extract GLPI. "
-    "Les champs métier Action/Deadline/etc. sont conservés "
-    "lors des imports grâce à l'ID GLPI."
+    
 )
