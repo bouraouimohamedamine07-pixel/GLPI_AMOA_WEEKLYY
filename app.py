@@ -589,9 +589,7 @@ init_db()
 st.markdown("# BKFI AMOA — GLPI Weekly")
 
 st.caption(
-    "Plateforme de pilotage inspirée de votre fichier "
-    "BKFI_AMOA_suivi GLPI — import GLPI, Action Log, "
-    "Workload et analyses type TCD."
+    "Plateforme de pilotage des tickets GLPI."
 )
 
 
