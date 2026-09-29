@@ -1306,11 +1306,10 @@ elif page == "Référentiel / IA":
 
     st.write(
         "Les catégories métier ci-dessous sont celles "
-        "de ton référentiel actuel : **Anomalie, "
+        " **Anomalie, "
         "Amélioration, Nouvelle demande, "
         "Réglementaire / conformité, Technique, "
         "Data & reporting, Formation, Correction, Accès**. "
-        "Elles sont modifiables sans changer le code."
     )
 
     labels = list(rules)
