@@ -1378,5 +1378,5 @@ elif page == "Référentiel / IA":
 # -----------------------------
 
 st.caption(
-    
+   " Données affichées depuis Excel GLPI" 
 )
