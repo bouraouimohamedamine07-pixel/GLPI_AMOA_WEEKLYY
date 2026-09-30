@@ -916,8 +916,8 @@ if page == "Dashboard":
         st.bar_chart(
             filtered["Function"]
             .value_counts()
-            .head(12),
-            vertical=True
+            .head(12)
+
             
         )
 
