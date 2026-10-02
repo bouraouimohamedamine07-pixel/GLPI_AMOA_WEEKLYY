@@ -7,6 +7,32 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+import numpy as np
+
+# Embeddings locaux (comprend le sens) : pip install sentence-transformers
+try:
+    from sentence_transformers import SentenceTransformer
+    EMBED_AVAILABLE = True
+except Exception:
+    EMBED_AVAILABLE = False
+
+EMBED_MODELS = {
+    "Rapide (MiniLM, ~120 MB)": "paraphrase-multilingual-MiniLM-L12-v2",
+    "Précis (mpnet, ~1.1 GB) — recommandé": "paraphrase-multilingual-mpnet-base-v2",
+}
+
+DEFAULT_DESC = {
+    "Anomalie": "Un problème ou un bug : l'application ne fonctionne pas, plante, affiche une erreur ou un résultat incorrect",
+    "Amélioration": "Demande d'évolution ou d'amélioration d'une fonctionnalité existante",
+    "Nouvelle demande": "Nouveau besoin ou nouvelle fonctionnalité à créer, qui n'existe pas encore",
+    "Réglementaire / conformité": "Exigence réglementaire, audit, conformité, norme ou contrôle",
+    "Technique": "Problème d'infrastructure : serveur, réseau, connexion, base de données, performance, installation",
+    "Data & reporting": "Demande de rapport, extraction de données, statistiques, tableau de bord, indicateurs",
+    "Formation": "Besoin de formation, d'explication, de documentation ou d'accompagnement pour utiliser l'outil",
+    "Correction": "Correction de données erronées ou d'une erreur de saisie dans le système",
+    "Accès": "Demande d'accès, habilitation, droits, compte, mot de passe ou permissions",
+}
+
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "glpi_dashboard.db"
 DEFAULT_MASTER = APP_DIR / "BKFI_AMOA_suivi GLPI.xlsx"
@@ -66,13 +92,97 @@ def init_db():
             statut_glpi TEXT,
             categorie_glpi TEXT,
             function_auto TEXT,
-            responsable TEXT
+            responsable TEXT,
+            technicien TEXT
+        )""")
+
+        # Migration : ajoute la colonne technicien si l'ancienne table ne l'a pas
+        cols = [r[1] for r in con.execute("PRAGMA table_info(snapshot_rows)")]
+        if "technicien" not in cols:
+            con.execute("ALTER TABLE snapshot_rows ADD COLUMN technicien TEXT")
+
+        con.execute("""CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )""")
 
         con.execute("""CREATE TABLE IF NOT EXISTS rules (
             label TEXT PRIMARY KEY,
             keywords TEXT
         )""")
+
+
+def get_setting(key, default=""):
+    with db() as con:
+        r = con.execute(
+            "SELECT value FROM settings WHERE key=?", (key,)
+        ).fetchone()
+    return r[0] if r else default
+
+
+def set_setting(key, value):
+    with db() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES (?,?)",
+            (key, value)
+        )
+
+
+def get_desc(label):
+    return get_setting("desc:" + label, DEFAULT_DESC.get(label, ""))
+
+
+def get_embed_model_name():
+    cur = get_setting("embed_model", list(EMBED_MODELS)[0])
+    return cur if cur in EMBED_MODELS else list(EMBED_MODELS)[0]
+
+
+DEFAULT_RULES = {
+    "Anomalie": [
+        "bug", "erreur", "anomalie", "dysfonctionnement",
+        "bloqué", "blocage", "ne fonctionne", "message d'erreur"
+    ],
+    "Amélioration": [
+        "amélioration", "optimiser", "optimisation",
+        "évolution", "ajout", "améliorer", "amélioré"
+    ],
+    "Nouvelle demande": [
+        "nouvelle demande", "nouveau besoin",
+        "demande de création", "besoin de",
+        "souhaite mettre en place"
+    ],
+    "Réglementaire / conformité": [
+        "réglementaire", "conformité", "audit",
+        "obligation", "loi", "norme", "contrôle réglementaire"
+    ],
+    "Technique": [
+        "serveur", "réseau", "connexion", "base de données",
+        "sql", "performance", "infrastructure",
+        "système", "installation"
+    ],
+    "Data & reporting": [
+        "reporting", "rapport", "report", "état",
+        "statistique", "dashboard", "tableau de bord",
+        "requête", "donnée", "données", "excel",
+        "power bi", "indicateur", "kpi"
+    ],
+    "Formation": [
+        "formation", "former", "apprentissage",
+        "documentation", "guide utilisateur",
+        "manuel", "explication", "accompagnement",
+        "comment utiliser"
+    ],
+    "Correction": [
+        "corriger", "correction", "rectifier",
+        "mauvaise donnée", "erreur de saisie",
+        "donnée incorrecte", "modifier une erreur"
+    ],
+    "Accès": [
+        "accès", "acces", "habilitation", "habilitations",
+        "droit", "droits", "permission", "permissions",
+        "compte", "mot de passe", "profil", "autorisation"
+    ],
+}
 
 
 def load_rules():
@@ -91,52 +201,7 @@ def load_rules():
             for r in rows
         }
 
-    return {
-        "Anomalie": [
-            "bug", "erreur", "anomalie", "dysfonctionnement",
-            "bloqué", "blocage", "ne fonctionne", "message d'erreur"
-        ],
-        "Amélioration": [
-            "amélioration", "optimiser", "optimisation",
-            "évolution", "ajout", "améliorer", "amélioré"
-        ],
-        "Nouvelle demande": [
-            "nouvelle demande", "nouveau besoin",
-            "demande de création", "besoin de",
-            "souhaite mettre en place"
-        ],
-        "Réglementaire / conformité": [
-            "réglementaire", "conformité", "audit",
-            "obligation", "loi", "norme", "contrôle réglementaire"
-        ],
-        "Technique": [
-            "serveur", "réseau", "connexion", "base de données",
-            "sql", "performance", "infrastructure",
-            "système", "installation"
-        ],
-        "Data & reporting": [
-            "reporting", "rapport", "report", "état",
-            "statistique", "dashboard", "tableau de bord",
-            "requête", "donnée", "données", "excel",
-            "power bi", "indicateur", "kpi"
-        ],
-        "Formation": [
-            "formation", "former", "apprentissage",
-            "documentation", "guide utilisateur",
-            "manuel", "explication", "accompagnement",
-            "comment utiliser"
-        ],
-        "Correction": [
-            "corriger", "correction", "rectifier",
-            "mauvaise donnée", "erreur de saisie",
-            "donnée incorrecte", "modifier une erreur"
-        ],
-        "Accès": [
-            "accès", "acces", "habilitation", "habilitations",
-            "droit", "droits", "permission", "permissions",
-            "compte", "mot de passe", "profil", "autorisation"
-        ],
-    }
+    return {k: list(v) for k, v in DEFAULT_RULES.items()}
 
 
 def save_rules(rules):
@@ -154,7 +219,12 @@ def norm(v):
     return str(v).strip()
 
 
+# -----------------------------
+# Classification
+# -----------------------------
+
 def classify(text, rules):
+    """Étape 1 : classification par mots-clés."""
     text = norm(text).lower()
 
     if not text:
@@ -189,16 +259,192 @@ def classify(text, rules):
 
     confidence = min(
         99.0,
-        max(
-            35.0,
-            50 + 50 * best_score / total
-        )
+        max(35.0, 50 + 50 * best_score / total)
     )
 
     if len(ordered) > 1 and ordered[1][1] == best_score:
         confidence = min(confidence, 55.0)
 
     return best, round(confidence, 1)
+
+
+def ticket_text(titre, description, categorie_glpi=""):
+    # Le titre est répété pour lui donner plus de poids
+    return f"{norm(titre)} {norm(titre)} {norm(description)} {norm(categorie_glpi)}"
+
+
+def build_samples(df, rules):
+    """
+    Exemples d'apprentissage pour le modèle sémantique :
+    - la catégorie corrigée à la main (override) si elle existe
+    - sinon la catégorie trouvée par mots-clés (quand elle est sûre)
+    """
+    samples = []
+
+    for _, r in df.iterrows():
+        t = ticket_text(
+            r.get("titre", ""),
+            r.get("description", ""),
+            r.get("categorie_glpi", "")
+        )
+
+        ov = norm(r.get("function_override", ""))
+
+        if ov in rules:
+            samples.append((t, ov))
+            continue
+
+        lab, _ = classify(
+            f"{r.get('titre', '')} {r.get('description', '')}",
+            rules
+        )
+
+        if lab != "À vérifier":
+            samples.append((t, lab))
+
+    return samples
+
+
+@st.cache_resource(show_spinner="Chargement du modèle IA (1ère fois : téléchargement, internet requis)...")
+def load_embedder(model_id):
+    return SentenceTransformer(model_id)
+
+
+def embed_batch(texts, rules, samples):
+    """
+    Compare le SENS du ticket au sens de chaque catégorie
+    (nom + description + mots-clés) et aux tickets déjà classés.
+    Retourne (catégorie, confiance, méthode) + top 3 dans session_state.
+    """
+    m = load_embedder(EMBED_MODELS[get_embed_model_name()])
+    labels = list(rules)
+
+    ptxt, plab = [], []
+
+    for l in labels:
+        words = [w for w in rules[l] if w]
+        desc = get_desc(l).strip()
+
+        if desc:
+            ptxt.append(desc)
+            plab.append(l)
+            ptxt.append(f"{l} : {desc}")
+            plab.append(l)
+
+        ptxt.append(f"{l} : " + ", ".join(words))
+        plab.append(l)
+
+        for w in words:
+            ptxt.append(f"{l} : {w}")
+            plab.append(l)
+
+    for t, l in samples[:2000]:
+        if l in rules and t.strip():
+            ptxt.append(t[:500])
+            plab.append(l)
+
+    P = m.encode(ptxt, normalize_embeddings=True, batch_size=64)
+    Q = m.encode([t[:500] for t in texts], normalize_embeddings=True, batch_size=64)
+
+    sims = Q @ P.T
+
+    idx = {l: [i for i, x in enumerate(plab) if x == l] for l in labels}
+
+    out, tops = [], []
+
+    for row in sims:
+        sc = np.array([
+            np.sort(row[idx[l]])[-3:].mean() for l in labels
+        ])
+        e = np.exp((sc - sc.max()) * 20)
+        pr = e / e.sum()
+        order = np.argsort(-pr)
+        i = int(order[0])
+        out.append((labels[i], round(float(pr[i]) * 100, 1), "embeddings"))
+        tops.append([(labels[j], round(float(pr[j]) * 100, 1)) for j in order[:3]])
+
+    st.session_state["ia_top3"] = tops
+
+    return out
+
+
+def semantic_batch(texts, rules, samples):
+    st.session_state["ia_error"] = ""
+    st.session_state["ia_top3"] = []
+
+    if not texts:
+        return []
+
+    if not EMBED_AVAILABLE:
+        st.session_state["ia_error"] = (
+            "sentence-transformers n'est pas installé : "
+            "python -m pip install sentence-transformers"
+        )
+        return [("À vérifier", 0.0, "indisponible")] * len(texts)
+
+    try:
+        return embed_batch(texts, rules, samples)
+    except Exception as e:
+        st.session_state["ia_error"] = f"Embeddings : {e}"
+        return [("À vérifier", 0.0, "erreur")] * len(texts)
+
+
+def classify_rows(df, rules, samples_df=None):
+    """
+    df : colonnes titre, description, categorie_glpi, function_override.
+    1) mots-clés ; 2) pour le reste, embeddings (sens).
+    """
+    samples = build_samples(samples_df if samples_df is not None else df, rules)
+
+    results = [None] * len(df)
+    pending = []
+
+    for pos, (_, r) in enumerate(df.iterrows()):
+
+        lab, conf = classify(f"{r['titre']} {r['description']}", rules)
+
+        if lab != "À vérifier":
+            results[pos] = (lab, conf, "mots-clés")
+            continue
+
+        t = ticket_text(r["titre"], r["description"], r["categorie_glpi"])
+
+        if norm(t):
+            pending.append((pos, t))
+        else:
+            results[pos] = ("À vérifier", 0.0, "texte vide")
+
+    if pending:
+        sem = semantic_batch([t for _, t in pending], rules, samples)
+        for (pos, _), r in zip(pending, sem):
+            results[pos] = r
+
+    return results
+
+
+def reclassify_all():
+    """Recalcule la catégorie auto de tous les tickets déjà en base."""
+    rules = load_rules()
+
+    with db() as con:
+        t = pd.read_sql_query("SELECT * FROM tickets", con)
+
+    if t.empty:
+        return 0
+
+    for c in ["titre", "description", "categorie_glpi", "function_override"]:
+        t[c] = t[c].fillna("")
+
+    res = classify_rows(t, rules)
+
+    with db() as con:
+        for (_, r), (lab, _, _) in zip(t.iterrows(), res):
+            con.execute(
+                "UPDATE tickets SET function_auto=? WHERE id=?",
+                (lab, r["id"])
+            )
+
+    return len(t)
 
 
 # -----------------------------
@@ -217,51 +463,34 @@ def read_glpi(path):
         "Date d'ouverture": "date_ouverture",
         "Priorité": "priorite",
         "Demandeur - Demandeur": "demandeur",
-
-        # IMPORTANT :
         # Le technicien vient directement de GLPI
         "Attribué à - Technicien": "technicien",
-
         "Catégorie": "categorie_glpi",
         "Dernière modification": "derniere_modif",
     }
 
-    missing = [
-        x for x in rename
-        if x not in raw.columns
-    ]
+    missing = [x for x in rename if x not in raw.columns]
 
     if missing:
         raise ValueError(
-            "Colonnes GLPI manquantes: "
-            + ", ".join(missing)
+            "Colonnes GLPI manquantes: " + ", ".join(missing)
         )
 
-    df = raw.rename(columns=rename)[
-        list(rename.values())
-    ].copy()
+    df = raw.rename(columns=rename)[list(rename.values())].copy()
 
     df["id"] = (
-        df["id"]
-        .astype(str)
-        .str.replace(r"\.0$", "", regex=True)
+        df["id"].astype(str).str.replace(r"\.0$", "", regex=True)
     )
 
     for c in df.columns:
         df[c] = df[c].map(norm)
 
-    return df.drop_duplicates(
-        "id",
-        keep="last"
-    )
+    return df.drop_duplicates("id", keep="last")
 
 
 def get_tickets():
     with db() as con:
-        return pd.read_sql_query(
-            "SELECT * FROM tickets",
-            con
-        )
+        return pd.read_sql_query("SELECT * FROM tickets", con)
 
 
 def import_glpi(path):
@@ -269,28 +498,30 @@ def import_glpi(path):
 
     incoming = read_glpi(path)
 
-    now = datetime.now().isoformat(
-        timespec="seconds"
-    )
+    now = datetime.now().isoformat(timespec="seconds")
 
     with db() as con:
 
-        existing = pd.read_sql_query(
-            "SELECT * FROM tickets",
-            con
-        )
+        existing = pd.read_sql_query("SELECT * FROM tickets", con)
 
         existing = (
             existing.set_index("id")
             if not existing.empty
-            else pd.DataFrame().set_index(
-                pd.Index([], name="id")
-            )
+            else pd.DataFrame().set_index(pd.Index([], name="id"))
         )
+
+        # --- Modèle sémantique entraîné sur les tickets déjà connus ---
+        train_df = incoming.copy()
+        train_df["function_override"] = [
+            norm(existing.loc[i, "function_override"])
+            if i in existing.index else ""
+            for i in train_df["id"]
+        ]
+        auto_results = classify_rows(train_df, rules)
 
         rows = []
 
-        for _, r in incoming.iterrows():
+        for pos, (_, r) in enumerate(incoming.iterrows()):
 
             rid = r["id"]
 
@@ -300,156 +531,70 @@ def import_glpi(path):
                 else {}
             )
 
-            fn_auto, _ = classify(
-                f"{r['titre']} {r['description']}",
-                rules
-            )
+            fn_auto = auto_results[pos][0]
 
             rows.append({
                 **r.to_dict(),
-
                 "function_auto": fn_auto,
-
-                "function_override":
-                    old.get(
-                        "function_override",
-                        ""
-                    ),
-
-                "action":
-                    old.get("action", ""),
-
-                "blocage":
-                    old.get("blocage", ""),
-
-                "jira":
-                    old.get("jira", ""),
-
-                # Ancien champ conservé uniquement
-                # pour compatibilité avec la DB.
-                # Il n'est plus utilisé dans le dashboard.
-                "responsable":
-                    old.get("responsable", ""),
-
-                "deadline":
-                    old.get("deadline", ""),
-
-                "statut_operationnel":
-                    old.get(
-                        "statut_operationnel",
-                        "Nouveau"
-                    ),
-
-                "date_cloture":
-                    old.get("date_cloture", ""),
-
-                "commentaire":
-                    old.get("commentaire", ""),
-
-                "first_seen":
-                    old.get("first_seen", now),
-
-                "last_import":
-                    now,
+                "function_override": old.get("function_override", ""),
+                "action": old.get("action", ""),
+                "blocage": old.get("blocage", ""),
+                "jira": old.get("jira", ""),
+                # Ancien champ conservé uniquement pour compatibilité DB
+                "responsable": old.get("responsable", ""),
+                "deadline": old.get("deadline", ""),
+                "statut_operationnel": old.get("statut_operationnel", "Nouveau"),
+                "date_cloture": old.get("date_cloture", ""),
+                "commentaire": old.get("commentaire", ""),
+                "first_seen": old.get("first_seen", now),
+                "last_import": now,
             })
 
         merged = pd.DataFrame(rows)
 
         cols = [
-            "id",
-            "titre",
-            "entite",
-            "statut_glpi",
-            "description",
-            "date_ouverture",
-            "priorite",
-            "demandeur",
-            "technicien",
-            "categorie_glpi",
-            "derniere_modif",
-            "function_auto",
-            "function_override",
-            "action",
-            "blocage",
-            "jira",
-            "responsable",
-            "deadline",
-            "statut_operationnel",
-            "date_cloture",
-            "commentaire",
-            "first_seen",
-            "last_import"
+            "id", "titre", "entite", "statut_glpi", "description",
+            "date_ouverture", "priorite", "demandeur", "technicien",
+            "categorie_glpi", "derniere_modif", "function_auto",
+            "function_override", "action", "blocage", "jira",
+            "responsable", "deadline", "statut_operationnel",
+            "date_cloture", "commentaire", "first_seen", "last_import"
         ]
 
         merged = merged[cols]
 
-        merged.to_sql(
-            "tickets",
-            con,
-            if_exists="replace",
-            index=False
-        )
+        merged.to_sql("tickets", con, if_exists="replace", index=False)
 
         cur = con.execute(
             """
-            INSERT INTO snapshots(
-                imported_at,
-                source_file,
-                ticket_count
-            )
+            INSERT INTO snapshots(imported_at, source_file, ticket_count)
             VALUES (?,?,?)
             """,
-            (
-                now,
-                os.path.basename(path),
-                len(merged)
-            )
+            (now, os.path.basename(path), len(merged))
         )
 
         import_id = cur.lastrowid
 
         snap = merged[
-            [
-                "id",
-                "statut_glpi",
-                "categorie_glpi",
-                "function_auto"
-            ]
+            ["id", "statut_glpi", "categorie_glpi", "function_auto", "technicien"]
         ].copy()
 
-        # Le snapshot conserve désormais le technicien GLPI
-        snap["technicien"] = merged["technicien"]
+        snap = snap.rename(columns={"id": "ticket_id"})
         snap["import_id"] = import_id
 
-        snap.to_sql(
-            "snapshot_rows",
-            con,
-            if_exists="append",
-            index=False
-        )
+        snap.to_sql("snapshot_rows", con, if_exists="append", index=False)
 
     return len(merged), import_id
 
 
 def import_master(master_path):
-    """
-    Bootstrap des données manuelles existantes.
-
-    IMPORTANT :
-    Le champ Responsable de l'ancien fichier n'est plus
-    utilisé comme responsable dans l'application.
-
-    Le Technicien reste celui provenant directement de GLPI.
-    """
+    """Bootstrap des données manuelles existantes (ancien fichier BKFI AMOA)."""
 
     if not master_path or not os.path.exists(master_path):
         return 0
 
     try:
-        x = pd.read_excel(
-            master_path,
-            sheet_name="Action_Log"
-        )
+        x = pd.read_excel(master_path, sheet_name="Action_Log")
     except Exception:
         return 0
 
@@ -457,9 +602,7 @@ def import_master(master_path):
         return 0
 
     x["N° ticket GLPI"] = (
-        x["N° ticket GLPI"]
-        .astype(str)
-        .str.replace(r"\.0$", "", regex=True)
+        x["N° ticket GLPI"].astype(str).str.replace(r"\.0$", "", regex=True)
     )
 
     with db() as con:
@@ -468,19 +611,13 @@ def import_master(master_path):
 
         for _, r in x.iterrows():
 
-            tid = norm(
-                r.get("N° ticket GLPI")
-            )
+            tid = norm(r.get("N° ticket GLPI"))
 
-            if not tid or tid.lower() in {
-                "nan",
-                "#n/a"
-            }:
+            if not tid or tid.lower() in {"nan", "#n/a"}:
                 continue
 
             exists = con.execute(
-                "SELECT id FROM tickets WHERE id=?",
-                (tid,)
+                "SELECT id FROM tickets WHERE id=?", (tid,)
             ).fetchone()
 
             if not exists:
@@ -501,6 +638,7 @@ def import_master(master_path):
                 WHERE id=?
                 """,
                 (
+                    # "Function" = nom de la colonne dans l'ancien fichier Excel
                     norm(r.get("Function")),
                     norm(r.get("Action")),
                     norm(r.get("Blocage")),
@@ -528,54 +666,34 @@ def pivot_table(df, rows, cols, value, agg):
         return pd.DataFrame()
 
     if value == "Nombre de tickets":
-
         temp = df.copy()
-
         temp["__count"] = 1
-
         value_col = "__count"
-
         aggfunc = "sum"
-
     else:
-
+        temp = df
         value_col = value
-
         aggfunc = {
             "sum": "sum",
             "moyenne": "mean",
             "min": "min",
             "max": "max",
             "count": "count"
-        }.get(
-            agg,
-            "count"
-        )
+        }.get(agg, "count")
+
+    kwargs = dict(
+        index=rows,
+        values=value_col,
+        aggfunc=aggfunc,
+        fill_value=0,
+        margins=True,
+        margins_name="Total"
+    )
 
     if cols:
+        kwargs["columns"] = cols
 
-        p = pd.pivot_table(
-            temp if value == "Nombre de tickets" else df,
-            index=rows,
-            columns=cols,
-            values=value_col,
-            aggfunc=aggfunc,
-            fill_value=0,
-            margins=True,
-            margins_name="Total"
-        )
-
-    else:
-
-        p = pd.pivot_table(
-            temp if value == "Nombre de tickets" else df,
-            index=rows,
-            values=value_col,
-            aggfunc=aggfunc,
-            fill_value=0,
-            margins=True,
-            margins_name="Total"
-        )
+    p = pd.pivot_table(temp, **kwargs)
 
     return p.reset_index()
 
@@ -588,9 +706,7 @@ init_db()
 
 st.markdown("# BKFI AMOA — GLPI Weekly")
 
-st.caption(
-    "Plateforme de pilotage des tickets GLPI."
-)
+st.caption("Plateforme de pilotage des tickets GLPI.")
 
 
 # -----------------------------
@@ -611,24 +727,17 @@ with st.sidebar:
         type=["xlsx"]
     )
 
-    if st.button(
-        "🔄 Importer / Actualiser",
-        use_container_width=True
-    ):
+    if st.button("🔄 Importer / Actualiser", use_container_width=True):
 
         if glpi_path is None:
 
-            st.error(
-                "Sélectionne d'abord l'extract GLPI du jour."
-            )
+            st.error("Sélectionne d'abord l'extract GLPI du jour.")
 
         else:
 
             temp = APP_DIR / "_incoming_glpi.xlsx"
 
-            temp.write_bytes(
-                glpi_path.getvalue()
-            )
+            temp.write_bytes(glpi_path.getvalue())
 
             try:
 
@@ -638,15 +747,12 @@ with st.sidebar:
 
                     mp = APP_DIR / "_master.xlsx"
 
-                    mp.write_bytes(
-                        master_path.getvalue()
-                    )
+                    mp.write_bytes(master_path.getvalue())
 
                     import_master(mp)
 
                 st.success(
-                    f"Import terminé : {n} tickets — "
-                    f"snapshot #{iid}."
+                    f"Import terminé : {n} tickets — snapshot #{iid}."
                 )
 
                 st.rerun()
@@ -692,12 +798,9 @@ if df.empty:
 # Effective fields
 # -----------------------------
 
-# Effective Function:
-# manual override wins.
-df["Function"] = df["function_override"].where(
-    df["function_override"]
-    .fillna("")
-    .str.strip() != "",
+# Catégorie (métier) : la correction manuelle prime sur l'automatique.
+df["Catégorie"] = df["function_override"].where(
+    df["function_override"].fillna("").str.strip() != "",
     df["function_auto"]
 )
 
@@ -707,16 +810,7 @@ df["Statut GLPI"] = df["statut_glpi"]
 
 df["Priorité"] = df["priorite"]
 
-
-# IMPORTANT
-# Le Responsable est maintenant remplacé par le Technicien.
-#
-# Source :
-# GLPI -> "Attribué à - Technicien"
-#
-# Si le ticket n'a pas de technicien :
-# "Non affecté"
-
+# Technicien GLPI ("Attribué à - Technicien"), sinon "Non affecté"
 df["Technicien"] = (
     df["technicien"]
     .fillna("")
@@ -734,104 +828,43 @@ with st.sidebar:
 
     st.header("🔎 Filtres")
 
-    statuses = sorted([
-        x
-        for x in df["Statut GLPI"].dropna().unique()
-        if x
-    ])
+    statuses = sorted([x for x in df["Statut GLPI"].dropna().unique() if x])
+    cats = sorted([x for x in df["Catégorie GLPI"].dropna().unique() if x])
+    categories = sorted([x for x in df["Catégorie"].dropna().unique() if x])
+    technicians = sorted([x for x in df["Technicien"].dropna().unique() if x])
 
-    cats = sorted([
-        x
-        for x in df["Catégorie GLPI"].dropna().unique()
-        if x
-    ])
+    chosen_status = st.multiselect("Statut GLPI", statuses)
 
-    funcs = sorted([
-        x
-        for x in df["Function"].dropna().unique()
-        if x
-    ])
+    chosen_categorie = st.multiselect("Catégorie", categories)
 
-    technicians = sorted([
-        x
-        for x in df["Technicien"].dropna().unique()
-        if x
-    ])
+    chosen_cat = st.multiselect("Catégorie GLPI", cats)
 
-    chosen_status = st.multiselect(
-        "Statut GLPI",
-        statuses
-    )
+    chosen_technician = st.multiselect("Technicien", technicians)
 
-    chosen_func = st.multiselect(
-        "Function",
-        funcs
-    )
-
-    chosen_cat = st.multiselect(
-        "Catégorie GLPI",
-        cats
-    )
-
-    chosen_technician = st.multiselect(
-        "Technicien",
-        technicians
-    )
-
-    search = st.text_input(
-        "🔍 Recherche ticket / titre"
-    )
+    search = st.text_input("🔍 Recherche ticket / titre")
 
 
 filtered = df.copy()
 
 if chosen_status:
+    filtered = filtered[filtered["Statut GLPI"].isin(chosen_status)]
 
-    filtered = filtered[
-        filtered["Statut GLPI"].isin(
-            chosen_status
-        )
-    ]
-
-if chosen_func:
-
-    filtered = filtered[
-        filtered["Function"].isin(
-            chosen_func
-        )
-    ]
+if chosen_categorie:
+    filtered = filtered[filtered["Catégorie"].isin(chosen_categorie)]
 
 if chosen_cat:
-
-    filtered = filtered[
-        filtered["Catégorie GLPI"].isin(
-            chosen_cat
-        )
-    ]
+    filtered = filtered[filtered["Catégorie GLPI"].isin(chosen_cat)]
 
 if chosen_technician:
-
-    filtered = filtered[
-        filtered["Technicien"].isin(
-            chosen_technician
-        )
-    ]
+    filtered = filtered[filtered["Technicien"].isin(chosen_technician)]
 
 if search:
 
     q = search.lower()
 
     mask = (
-        filtered
-        .astype(str)
-        .apply(
-            lambda col:
-            col.str.lower()
-            .str.contains(
-                re.escape(q),
-                na=False
-            )
-        )
+        filtered.astype(str)
+        .apply(lambda col: col.str.lower().str.contains(re.escape(q), na=False))
         .any(axis=1)
     )
 
@@ -848,59 +881,36 @@ if page == "Dashboard":
 
     c1, c2, c3, c4, c5 = st.columns(5)
 
-    c1.metric(
-        "Total tickets",
-        len(filtered)
-    )
+    c1.metric("Total tickets", len(filtered))
 
     c2.metric(
         "Ouverts / en cours",
         int(
             (
-                ~filtered["Statut GLPI"]
-                .str.lower()
-                .isin([
-                    "résolu",
-                    "clos",
-                    "closed",
-                    "fermé"
-                ])
+                ~filtered["Statut GLPI"].str.lower().isin(
+                    ["résolu", "clos", "closed", "fermé"]
+                )
             ).sum()
         )
     )
 
     c3.metric(
         "Résolus",
-        int(
-            filtered["Statut GLPI"]
-            .str.lower()
-            .eq("résolu")
-            .sum()
-        )
+        int(filtered["Statut GLPI"].str.lower().eq("résolu").sum())
     )
 
     c4.metric(
         "Clos",
         int(
-            filtered["Statut GLPI"]
-            .str.lower()
-            .isin([
-                "clos",
-                "fermé",
-                "closed"
-            ])
-            .sum()
+            filtered["Statut GLPI"].str.lower().isin(
+                ["clos", "fermé", "closed"]
+            ).sum()
         )
     )
 
     c5.metric(
         "Sans technicien",
-        int(
-            (
-                filtered["Technicien"]
-                == "Non affecté"
-            ).sum()
-        )
+        int((filtered["Technicien"] == "Non affecté").sum())
     )
 
     st.divider()
@@ -908,55 +918,25 @@ if page == "Dashboard":
     a, b = st.columns(2)
 
     with a:
-
-        st.markdown(
-            "#### Tickets par Function"
-        )
-
+        st.markdown("#### Tickets par Catégorie")
         st.bar_chart(
-            filtered["Function"]
-            .value_counts()
-            .head(12),
+            filtered["Catégorie"].value_counts().head(12),
             horizontal=True
-
-            
         )
 
     with b:
-
-        st.markdown(
-            "#### Tickets par statut GLPI"
-        )
-
-        st.bar_chart(
-            filtered["Statut GLPI"]
-            .value_counts()
-        )
+        st.markdown("#### Tickets par statut GLPI")
+        st.bar_chart(filtered["Statut GLPI"].value_counts())
 
     a, b = st.columns(2)
 
     with a:
-
-        st.markdown(
-            "#### Catégories GLPI"
-        )
-
-        st.bar_chart(
-            filtered["Catégorie GLPI"]
-            .value_counts()
-            .head(15)
-        )
+        st.markdown("#### Catégories GLPI")
+        st.bar_chart(filtered["Catégorie GLPI"].value_counts().head(15))
 
     with b:
-
-        st.markdown(
-            "#### Priorités"
-        )
-
-        st.bar_chart(
-            filtered["Priorité"]
-            .value_counts()
-        )
+        st.markdown("#### Priorités")
+        st.bar_chart(filtered["Priorité"].value_counts())
 
 
 # ============================================================
@@ -965,63 +945,26 @@ if page == "Dashboard":
 
 elif page == "Action Log":
 
-    st.subheader(
-        "Action Log — vue paramétrable"
-    )
+    st.subheader("Action Log — vue paramétrable")
 
     display_map = {
-
-        "ID ticket":
-            "id",
-
-        "Titre":
-            "titre",
-
-        "Function":
-            "Function",
-
-        "Action":
-            "action",
-
-        "Date ouverture":
-            "date_ouverture",
-
-        "Demandeur":
-            "demandeur",
-
-        "Catégorie GLPI":
-            "Catégorie GLPI",
-
-        "Priorité":
-            "Priorité",
-
-        "Blocage":
-            "blocage",
-
-        "Jira":
-            "jira",
-
-        # Responsable remplacé par Technicien
-        "Technicien":
-            "Technicien",
-
-        "Deadline":
-            "deadline",
-
-        "Statut GLPI":
-            "Statut GLPI",
-
-        "Statut opérationnel":
-            "statut_operationnel",
-
-        "Dernière modification":
-            "derniere_modif",
-
-        "Date clôture":
-            "date_cloture",
-
-        "Commentaire":
-            "commentaire"
+        "ID ticket": "id",
+        "Titre": "titre",
+        "Catégorie": "Catégorie",
+        "Action": "action",
+        "Date ouverture": "date_ouverture",
+        "Demandeur": "demandeur",
+        "Catégorie GLPI": "Catégorie GLPI",
+        "Priorité": "Priorité",
+        "Blocage": "blocage",
+        "Jira": "jira",
+        "Technicien": "Technicien",
+        "Deadline": "deadline",
+        "Statut GLPI": "Statut GLPI",
+        "Statut opérationnel": "statut_operationnel",
+        "Dernière modification": "derniere_modif",
+        "Date clôture": "date_cloture",
+        "Commentaire": "commentaire"
     }
 
     selected = st.multiselect(
@@ -1030,7 +973,7 @@ elif page == "Action Log":
         default=[
             "ID ticket",
             "Titre",
-            "Function",
+            "Catégorie",
             "Action",
             "Catégorie GLPI",
             "Priorité",
@@ -1042,12 +985,7 @@ elif page == "Action Log":
     )
 
     shown = (
-        filtered[
-            [
-                display_map[x]
-                for x in selected
-            ]
-        ].copy()
+        filtered[[display_map[x] for x in selected]].copy()
         if selected
         else pd.DataFrame()
     )
@@ -1061,9 +999,7 @@ elif page == "Action Log":
 
     st.download_button(
         "⬇️ Exporter cette vue Excel-compatible (CSV)",
-        shown.to_csv(
-            index=False
-        ).encode("utf-8-sig"),
+        shown.to_csv(index=False).encode("utf-8-sig"),
         "action_log_view.csv",
         "text/csv"
     )
@@ -1075,19 +1011,14 @@ elif page == "Action Log":
 
 elif page == "Analyse TCD":
 
-    st.subheader(
-        "📐 Analyse dynamique — style Tableau Croisé Dynamique"
-    )
+    st.subheader("📐 Analyse dynamique — style Tableau Croisé Dynamique")
 
     fields = [
-        "Function",
+        "Catégorie",
         "Catégorie GLPI",
         "Statut GLPI",
         "Priorité",
-
-        # Responsable remplacé par Technicien
         "Technicien",
-
         "demandeur",
         "entite",
         "statut_operationnel"
@@ -1096,7 +1027,7 @@ elif page == "Analyse TCD":
     rows = st.multiselect(
         "Étiquettes de lignes",
         fields,
-        default=["Function"]
+        default=["Catégorie"]
     )
 
     cols = st.multiselect(
@@ -1105,31 +1036,16 @@ elif page == "Analyse TCD":
         default=["Statut GLPI"]
     )
 
-    value = st.selectbox(
-        "Valeur",
-        ["Nombre de tickets"]
-    )
+    value = st.selectbox("Valeur", ["Nombre de tickets"])
 
     agg = st.selectbox(
         "Agrégation",
-        [
-            "count",
-            "sum",
-            "moyenne",
-            "min",
-            "max"
-        ]
+        ["count", "sum", "moyenne", "min", "max"]
     )
 
     if rows:
 
-        p = pivot_table(
-            filtered,
-            rows,
-            cols,
-            value,
-            agg
-        )
+        p = pivot_table(filtered, rows, cols, value, agg)
 
         st.dataframe(
             p,
@@ -1140,19 +1056,14 @@ elif page == "Analyse TCD":
 
         st.download_button(
             "⬇️ Exporter le TCD",
-            p.to_csv(
-                index=False
-            ).encode("utf-8-sig"),
+            p.to_csv(index=False).encode("utf-8-sig"),
             "tcd.csv",
             "text/csv"
         )
 
     else:
 
-        st.warning(
-            "Choisis au moins un champ dans "
-            "Étiquettes de lignes."
-        )
+        st.warning("Choisis au moins un champ dans Étiquettes de lignes.")
 
 
 # ============================================================
@@ -1163,30 +1074,17 @@ elif page == "Workload":
 
     st.subheader("Workload par Technicien")
 
-    # IMPORTANT :
-    # Le workload est maintenant calculé directement
-    # depuis Attribué à - Technicien de GLPI.
-
     wl = (
-        filtered
-        .groupby("Technicien")
+        filtered.groupby("Technicien")
         .size()
-        .sort_values(
-            ascending=False
-        )
+        .sort_values(ascending=False)
         .rename("Tickets")
         .reset_index()
     )
 
-    st.dataframe(
-        wl,
-        use_container_width=True,
-        hide_index=True
-    )
+    st.dataframe(wl, use_container_width=True, hide_index=True)
 
-    st.bar_chart(
-        wl.set_index("Technicien")
-    )
+    st.bar_chart(wl.set_index("Technicien"))
 
 
 # ============================================================
@@ -1199,100 +1097,36 @@ elif page == "Tickets":
 
     ids = filtered["id"].tolist()
 
-    tid = st.selectbox(
-        "Ticket",
-        ids
-    )
+    tid = st.selectbox("Ticket", ids)
 
-    r = filtered[
-        filtered["id"] == tid
-    ].iloc[0]
+    r = filtered[filtered["id"] == tid].iloc[0]
 
     c1, c2, c3, c4 = st.columns(4)
 
-    c1.metric(
-        "Statut GLPI",
-        r["Statut GLPI"]
-    )
+    c1.metric("Statut GLPI", r["Statut GLPI"])
+    c2.metric("Catégorie", r["Catégorie"])
+    c3.metric("Priorité", r["Priorité"])
+    c4.metric("Technicien", r["Technicien"])
 
-    c2.metric(
-        "Function",
-        r["Function"]
-    )
+    st.markdown(f"### #{tid} — {r['titre']}")
 
-    c3.metric(
-        "Priorité",
-        r["Priorité"]
-    )
-
-    c4.metric(
-        "Technicien",
-        r["Technicien"]
-    )
-
-    st.markdown(
-        f"### #{tid} — {r['titre']}"
-    )
-
-    st.write(
-        r["description"]
-    )
+    st.write(r["description"])
 
     left, right = st.columns(2)
 
     with left:
-
-        st.write(
-            "**Catégorie GLPI :**",
-            r["Catégorie GLPI"]
-        )
-
-        st.write(
-            "**Function automatique :**",
-            r["function_auto"]
-        )
-
-        st.write(
-            "**Function retenue :**",
-            r["Function"]
-        )
-
-        st.write(
-            "**Demandeur :**",
-            r["demandeur"]
-        )
-
-        st.write(
-            "**Technicien GLPI :**",
-            r["Technicien"]
-        )
+        st.write("**Catégorie GLPI :**", r["Catégorie GLPI"])
+        st.write("**Catégorie automatique :**", r["function_auto"])
+        st.write("**Catégorie retenue :**", r["Catégorie"])
+        st.write("**Demandeur :**", r["demandeur"])
+        st.write("**Technicien GLPI :**", r["Technicien"])
 
     with right:
-
-        st.write(
-            "**Action :**",
-            r["action"]
-        )
-
-        st.write(
-            "**Blocage :**",
-            r["blocage"]
-        )
-
-        st.write(
-            "**Jira :**",
-            r["jira"]
-        )
-
-        st.write(
-            "**Deadline :**",
-            r["deadline"]
-        )
-
-        st.write(
-            "**Statut opérationnel :**",
-            r["statut_operationnel"]
-        )
+        st.write("**Action :**", r["action"])
+        st.write("**Blocage :**", r["blocage"])
+        st.write("**Jira :**", r["jira"])
+        st.write("**Deadline :**", r["deadline"])
+        st.write("**Statut opérationnel :**", r["statut_operationnel"])
 
 
 # ============================================================
@@ -1301,19 +1135,60 @@ elif page == "Tickets":
 
 elif page == "Référentiel / IA":
 
-    st.subheader(
-        "🧠 Référentiel & classification automatique"
-    )
+    st.subheader("🧠 Référentiel & classification automatique")
 
     rules = load_rules()
 
     st.write(
-        "Les catégories métier ci-dessous sont celles "
-        " **Anomalie, "
-        "Amélioration, Nouvelle demande, "
-        "Réglementaire / conformité, Technique, "
-        "Data & reporting, Formation, Correction, Accès**. "
+        "Chaque ticket reçoit une **Catégorie** parmi : "
+        + ", ".join(f"**{k}**" for k in rules)
+        + ". Si aucun mot-clé ne correspond, le système analyse le sens "
+        "du texte (titre + description + catégorie GLPI) et choisit "
+        "automatiquement la catégorie la plus proche, en "
+        "s'appuyant sur les tickets déjà classés et sur les corrections manuelles."
     )
+
+    st.markdown("### Moteur IA — Embeddings local (pour les tickets sans mot-clé)")
+
+    st.caption("Comprend le sens du texte. Tourne en local : les données ne sortent pas du PC.")
+
+    if not EMBED_AVAILABLE:
+        st.warning(
+            "sentence-transformers n'est pas installé : "
+            "`python -m pip install sentence-transformers`"
+        )
+
+    names = list(EMBED_MODELS)
+    cur_model = get_embed_model_name()
+
+    chosen_model = st.radio(
+        "Modèle",
+        names,
+        index=names.index(cur_model),
+        horizontal=True
+    )
+
+    if chosen_model != cur_model:
+        set_setting("embed_model", chosen_model)
+        st.info("Modèle changé : clique sur « Reclasser tous les tickets existants ».")
+
+    with st.expander("📝 Description de chaque catégorie (améliore beaucoup la précision)"):
+        st.caption(
+            "Écris une phrase simple qui explique ce que contient la catégorie. "
+            "L'IA compare le ticket à ces phrases."
+        )
+        for l in rules:
+            d = st.text_area(
+                "Description — " + l,
+                get_desc(l),
+                key="desc_" + l,
+                height=70
+            )
+            if d != get_desc(l):
+                set_setting("desc:" + l, d)
+
+    if st.session_state.get("ia_error"):
+        st.error(st.session_state["ia_error"])
 
     labels = list(rules)
 
@@ -1331,10 +1206,9 @@ elif page == "Référentiel / IA":
             if x.strip()
         ]
 
-    if st.button(
-        "💾 Enregistrer le référentiel",
-        type="primary"
-    ):
+    b1, b2 = st.columns(2)
+
+    if b1.button("💾 Enregistrer le référentiel", type="primary"):
 
         save_rules(rules)
 
@@ -1343,35 +1217,58 @@ elif page == "Référentiel / IA":
             "Les nouveaux imports utiliseront ces règles."
         )
 
+    if b2.button("♻️ Reclasser tous les tickets existants"):
+
+        save_rules(rules)
+
+        with st.spinner("Classification en cours..."):
+            n = reclassify_all()
+
+        st.success(f"{n} tickets reclassés.")
+
+        if st.session_state.get("ia_error"):
+            st.error(st.session_state["ia_error"])
+
     st.divider()
 
-    st.markdown(
-        "### Testeur de classification"
-    )
+    st.markdown("### Testeur de classification")
 
-    txt = st.text_area(
-        "Texte du ticket",
-        ""
-    )
+    txt = st.text_area("Texte du ticket", "")
 
     if txt:
 
-        lab, conf = classify(
-            txt,
-            rules
-        )
+        train = df.copy()
+        for c in ["titre", "description", "categorie_glpi", "function_override"]:
+            train[c] = train[c].fillna("")
+
+        tdf = pd.DataFrame([{
+            "titre": txt, "description": "",
+            "categorie_glpi": "", "function_override": ""
+        }])
+
+        lab, conf, method = classify_rows(
+            tdf, rules, samples_df=train
+        )[0]
+
+        if st.session_state.get("ia_error"):
+            st.error(st.session_state["ia_error"])
 
         st.metric(
-            "Catégorie métier proposée",
+            "Catégorie proposée",
             lab,
-            f"Confiance {conf}%"
+            f"Confiance {conf}% — méthode : {method}"
         )
+
+        top3 = st.session_state.get("ia_top3") or []
+        if top3 and method == "embeddings":
+            st.caption(
+                "Top 3 : " + " · ".join(f"{l} ({c}%)" for l, c in top3[0])
+            )
 
         if conf < 60:
 
             st.warning(
-                "Confiance faible : "
-                "vérification humaine recommandée."
+                "Confiance faible : vérification humaine recommandée."
             )
 
 
@@ -1379,6 +1276,4 @@ elif page == "Référentiel / IA":
 # Footer
 # -----------------------------
 
-st.caption(
-   " Données affichées depuis Extraction GLPI" 
-)
+st.caption("Données affichées depuis Extraction GLPI")
