@@ -1,5 +1,7 @@
 import os
 import re
+import json
+import html
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +38,8 @@ DEFAULT_DESC = {
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "glpi_dashboard.db"
 DEFAULT_MASTER = APP_DIR / "BKFI_AMOA_suivi GLPI.xlsx"
+
+RAW_PREFIX = "Brut · "
 
 st.set_page_config(
     page_title="BKFI AMOA — GLPI Weekly",
@@ -76,8 +80,14 @@ def init_db():
             date_cloture TEXT,
             commentaire TEXT,
             first_seen TEXT,
-            last_import TEXT
+            last_import TEXT,
+            raw_json TEXT
         )""")
+
+        # Migration : ajoute raw_json si l'ancienne table ne l'a pas
+        tcols = [r[1] for r in con.execute("PRAGMA table_info(tickets)")]
+        if "raw_json" not in tcols:
+            con.execute("ALTER TABLE tickets ADD COLUMN raw_json TEXT")
 
         con.execute("""CREATE TABLE IF NOT EXISTS snapshots (
             import_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,9 +224,26 @@ def save_rules(rules):
 
 
 def norm(v):
-    if pd.isna(v):
+    if v is None:
         return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
     return str(v).strip()
+
+
+def clean_text(v):
+    """Nettoie le HTML GLPI (&lt;p&gt;, <br>, &nbsp;...) → texte brut."""
+    s = norm(v)
+    if not s:
+        return ""
+    s = html.unescape(s)
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = html.unescape(s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
 
 
 # -----------------------------
@@ -224,8 +251,8 @@ def norm(v):
 # -----------------------------
 
 def classify(text, rules):
-    """Étape 1 : classification par mots-clés."""
-    text = norm(text).lower()
+    """Étape 1 : classification par mots-clés (sur titre + description nettoyée)."""
+    text = clean_text(text).lower()
 
     if not text:
         return "À vérifier", 0.0
@@ -239,7 +266,8 @@ def classify(text, rules):
             if not w:
                 continue
 
-            if w in text:
+            # début de mot obligatoire (accepte pluriels / conjugaisons)
+            if re.search(r"(?<!\w)" + re.escape(w), text):
                 score += 2 + min(len(w.split()), 4)
 
         scores[label] = score
@@ -247,20 +275,11 @@ def classify(text, rules):
     if not scores or max(scores.values()) == 0:
         return "À vérifier", 0.0
 
-    ordered = sorted(
-        scores.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
+    ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     best, best_score = ordered[0]
-
     total = sum(scores.values()) or 1
 
-    confidence = min(
-        99.0,
-        max(35.0, 50 + 50 * best_score / total)
-    )
+    confidence = min(99.0, max(35.0, 50 + 50 * best_score / total))
 
     if len(ordered) > 1 and ordered[1][1] == best_score:
         confidence = min(confidence, 55.0)
@@ -269,8 +288,11 @@ def classify(text, rules):
 
 
 def ticket_text(titre, description, categorie_glpi=""):
-    # Le titre est répété pour lui donner plus de poids
-    return f"{norm(titre)} {norm(titre)} {norm(description)} {norm(categorie_glpi)}"
+    """La description (nettoyée) est la base du texte analysé."""
+    t = clean_text(titre)
+    d = clean_text(description)
+    c = clean_text(categorie_glpi)
+    return f"{t}. {d} {c}".strip()
 
 
 def build_samples(df, rules):
@@ -340,11 +362,11 @@ def embed_batch(texts, rules, samples):
 
     for t, l in samples[:2000]:
         if l in rules and t.strip():
-            ptxt.append(t[:500])
+            ptxt.append(t[:600])
             plab.append(l)
 
     P = m.encode(ptxt, normalize_embeddings=True, batch_size=64)
-    Q = m.encode([t[:500] for t in texts], normalize_embeddings=True, batch_size=64)
+    Q = m.encode([t[:600] for t in texts], normalize_embeddings=True, batch_size=64)
 
     sims = Q @ P.T
 
@@ -451,46 +473,95 @@ def reclassify_all():
 # GLPI Import
 # -----------------------------
 
+GLPI_RENAME = {
+    "ID": "id",
+    "Titre": "titre",
+    "Entité": "entite",
+    "Statut": "statut_glpi",
+    "Description": "description",
+    "Date d'ouverture": "date_ouverture",
+    "Priorité": "priorite",
+    "Demandeur - Demandeur": "demandeur",
+    # Le technicien vient directement de GLPI
+    "Attribué à - Technicien": "technicien",
+    "Catégorie": "categorie_glpi",
+    "Dernière modification": "derniere_modif",
+}
+
+
 def read_glpi(path):
+    """
+    Lit TOUTES les colonnes du fichier GLPI.
+    - les colonnes connues sont mappées vers les champs internes
+    - toutes les colonnes (connues ou non) sont aussi gardées brutes dans raw_json
+    - une colonne connue absente du fichier devient vide (pas d'erreur)
+    """
     raw = pd.read_excel(path)
 
-    rename = {
-        "ID": "id",
-        "Titre": "titre",
-        "Entité": "entite",
-        "Statut": "statut_glpi",
-        "Description": "description",
-        "Date d'ouverture": "date_ouverture",
-        "Priorité": "priorite",
-        "Demandeur - Demandeur": "demandeur",
-        # Le technicien vient directement de GLPI
-        "Attribué à - Technicien": "technicien",
-        "Catégorie": "categorie_glpi",
-        "Dernière modification": "derniere_modif",
-    }
+    # Noms de colonnes propres (espaces parasites)
+    raw.columns = [str(c).strip() for c in raw.columns]
 
-    missing = [x for x in rename if x not in raw.columns]
-
-    if missing:
+    if "ID" not in raw.columns:
         raise ValueError(
-            "Colonnes GLPI manquantes: " + ", ".join(missing)
+            "Colonne « ID » introuvable dans le fichier. "
+            "Colonnes trouvées : " + ", ".join(raw.columns)
         )
 
-    df = raw.rename(columns=rename)[list(rename.values())].copy()
+    # Tout en texte
+    rawstr = raw.copy()
+    for c in rawstr.columns:
+        rawstr[c] = rawstr[c].map(norm)
 
-    df["id"] = (
-        df["id"].astype(str).str.replace(r"\.0$", "", regex=True)
-    )
+    rawstr["ID"] = rawstr["ID"].str.replace(r"\.0$", "", regex=True)
 
-    for c in df.columns:
-        df[c] = df[c].map(norm)
+    # Champs internes
+    df = pd.DataFrame(index=rawstr.index)
 
-    return df.drop_duplicates("id", keep="last")
+    for src, dst in GLPI_RENAME.items():
+        df[dst] = rawstr[src] if src in rawstr.columns else ""
+
+    # JSON brut : toutes les colonnes du fichier
+    df["raw_json"] = [
+        json.dumps(rec, ensure_ascii=False)
+        for rec in rawstr.to_dict(orient="records")
+    ]
+
+    df = df[df["id"] != ""]
+
+    return df.drop_duplicates("id", keep="last").reset_index(drop=True)
 
 
 def get_tickets():
     with db() as con:
         return pd.read_sql_query("SELECT * FROM tickets", con)
+
+
+def expand_raw(df):
+    """
+    Déplie raw_json en colonnes « Brut · <nom de colonne> ».
+    Retourne (df enrichi, liste des noms de colonnes brutes).
+    """
+    if "raw_json" not in df.columns:
+        return df, []
+
+    def parse(s):
+        try:
+            return json.loads(s) if isinstance(s, str) and s else {}
+        except Exception:
+            return {}
+
+    recs = [parse(s) for s in df["raw_json"]]
+
+    raw_df = pd.DataFrame(recs, index=df.index).fillna("")
+
+    # On garde l'ordre des colonnes du fichier
+    raw_df.columns = [RAW_PREFIX + str(c) for c in raw_df.columns]
+
+    names = list(raw_df.columns)
+
+    out = pd.concat([df, raw_df], axis=1)
+
+    return out, names
 
 
 def import_glpi(path):
@@ -536,16 +607,16 @@ def import_glpi(path):
             rows.append({
                 **r.to_dict(),
                 "function_auto": fn_auto,
-                "function_override": old.get("function_override", ""),
-                "action": old.get("action", ""),
-                "blocage": old.get("blocage", ""),
-                "jira": old.get("jira", ""),
+                "function_override": norm(old.get("function_override", "")),
+                "action": norm(old.get("action", "")),
+                "blocage": norm(old.get("blocage", "")),
+                "jira": norm(old.get("jira", "")),
                 # Ancien champ conservé uniquement pour compatibilité DB
-                "responsable": old.get("responsable", ""),
-                "deadline": old.get("deadline", ""),
-                "statut_operationnel": old.get("statut_operationnel", "Nouveau"),
-                "date_cloture": old.get("date_cloture", ""),
-                "commentaire": old.get("commentaire", ""),
+                "responsable": norm(old.get("responsable", "")),
+                "deadline": norm(old.get("deadline", "")),
+                "statut_operationnel": norm(old.get("statut_operationnel", "")) or "Nouveau",
+                "date_cloture": norm(old.get("date_cloture", "")),
+                "commentaire": norm(old.get("commentaire", "")),
                 "first_seen": old.get("first_seen", now),
                 "last_import": now,
             })
@@ -558,7 +629,8 @@ def import_glpi(path):
             "categorie_glpi", "derniere_modif", "function_auto",
             "function_override", "action", "blocage", "jira",
             "responsable", "deadline", "statut_operationnel",
-            "date_cloture", "commentaire", "first_seen", "last_import"
+            "date_cloture", "commentaire", "first_seen", "last_import",
+            "raw_json"
         ]
 
         merged = merged[cols]
@@ -798,6 +870,9 @@ if df.empty:
 # Effective fields
 # -----------------------------
 
+# Colonnes brutes du fichier GLPI (toutes), préfixées « Brut · »
+df, RAW_COLS = expand_raw(df)
+
 # Catégorie (métier) : la correction manuelle prime sur l'automatique.
 df["Catégorie"] = df["function_override"].where(
     df["function_override"].fillna("").str.strip() != "",
@@ -810,6 +885,8 @@ df["Statut GLPI"] = df["statut_glpi"]
 
 df["Priorité"] = df["priorite"]
 
+df["Description"] = df["description"]
+
 # Technicien GLPI ("Attribué à - Technicien"), sinon "Non affecté"
 df["Technicien"] = (
     df["technicien"]
@@ -818,6 +895,10 @@ df["Technicien"] = (
     .str.strip()
     .replace("", "Non affecté")
 )
+
+# Sécurité : les champs utilisés par les graphiques ne doivent jamais être NaN
+for _c in ["Statut GLPI", "Catégorie GLPI", "Priorité", "Catégorie"]:
+    df[_c] = df[_c].fillna("")
 
 
 # -----------------------------
@@ -926,17 +1007,26 @@ if page == "Dashboard":
 
     with b:
         st.markdown("#### Tickets par statut GLPI")
-        st.bar_chart(filtered["Statut GLPI"].value_counts())
+        st.bar_chart(
+            filtered["Statut GLPI"].value_counts(),
+            horizontal=True
+        )
 
     a, b = st.columns(2)
 
     with a:
         st.markdown("#### Catégories GLPI")
-        st.bar_chart(filtered["Catégorie GLPI"].value_counts().head(15))
+        st.bar_chart(
+            filtered["Catégorie GLPI"].value_counts().head(15),
+            horizontal=True
+        )
 
     with b:
         st.markdown("#### Priorités")
-        st.bar_chart(filtered["Priorité"].value_counts())
+        st.bar_chart(
+            filtered["Priorité"].value_counts(),
+            horizontal=True
+        )
 
 
 # ============================================================
@@ -950,6 +1040,7 @@ elif page == "Action Log":
     display_map = {
         "ID ticket": "id",
         "Titre": "titre",
+        "Description": "Description",
         "Catégorie": "Catégorie",
         "Action": "action",
         "Date ouverture": "date_ouverture",
@@ -967,12 +1058,17 @@ elif page == "Action Log":
         "Commentaire": "commentaire"
     }
 
+    # Toutes les colonnes brutes du fichier GLPI
+    for rc in RAW_COLS:
+        display_map[rc] = rc
+
     selected = st.multiselect(
         "Colonnes",
         list(display_map),
         default=[
             "ID ticket",
             "Titre",
+            "Description",
             "Catégorie",
             "Action",
             "Catégorie GLPI",
@@ -1019,10 +1115,11 @@ elif page == "Analyse TCD":
         "Statut GLPI",
         "Priorité",
         "Technicien",
+        "Description",
         "demandeur",
         "entite",
         "statut_operationnel"
-    ]
+    ] + RAW_COLS
 
     rows = st.multiselect(
         "Étiquettes de lignes",
@@ -1084,7 +1181,7 @@ elif page == "Workload":
 
     st.dataframe(wl, use_container_width=True, hide_index=True)
 
-    st.bar_chart(wl.set_index("Technicien"))
+    st.bar_chart(wl.set_index("Technicien"), horizontal=True)
 
 
 # ============================================================
@@ -1096,6 +1193,10 @@ elif page == "Tickets":
     st.subheader("Ticket 360°")
 
     ids = filtered["id"].tolist()
+
+    if not ids:
+        st.info("Aucun ticket avec ces filtres.")
+        st.stop()
 
     tid = st.selectbox("Ticket", ids)
 
@@ -1127,6 +1228,13 @@ elif page == "Tickets":
         st.write("**Jira :**", r["jira"])
         st.write("**Deadline :**", r["deadline"])
         st.write("**Statut opérationnel :**", r["statut_operationnel"])
+
+    with st.expander("📄 Toutes les colonnes du fichier GLPI (brut)"):
+        raw_view = pd.DataFrame({
+            "Colonne": [c.replace(RAW_PREFIX, "", 1) for c in RAW_COLS],
+            "Valeur": [r[c] for c in RAW_COLS],
+        })
+        st.dataframe(raw_view, use_container_width=True, hide_index=True)
 
 
 # ============================================================
