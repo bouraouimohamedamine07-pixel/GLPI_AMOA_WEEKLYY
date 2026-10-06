@@ -441,6 +441,21 @@ def classify_rows(df, rules, samples_df=None):
         for (pos, _), r in zip(pending, sem):
             results[pos] = r
 
+    # Plus de « À vérifier » : si rien n'a pu classer le ticket
+    # (texte vide, IA indisponible ou en erreur), on prend la catégorie
+    # la plus fréquente parmi les tickets déjà classés.
+    labels_known = [l for _, l in samples if l in rules]
+
+    if labels_known:
+        fallback = max(set(labels_known), key=labels_known.count)
+    else:
+        fallback = list(rules)[0]
+
+    for pos, r in enumerate(results):
+        if r is None or r[0] not in rules:
+            conf = r[1] if r else 0.0
+            results[pos] = (fallback, conf, "par défaut")
+
     return results
 
 
