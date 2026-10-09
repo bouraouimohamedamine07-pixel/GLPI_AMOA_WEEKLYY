@@ -1094,11 +1094,7 @@ if page == "Dashboard":
 
     st.markdown("#### Taux de service par Catégorie GLPI")
 
-    st.caption(
-        "Taux de service (%) = (Nombre de tickets résolus dans les délais "
-        "/ Nombre total de tickets résolus) × 100 — "
-        "TR = 1 si le ticket est résolu ou clos dans les 24h, sinon 0."
-    )
+   
 
     done_df = filtered[
         filtered["Statut GLPI"].str.lower().isin(DONE_STATUS)
