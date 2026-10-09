@@ -1094,7 +1094,11 @@ if page == "Dashboard":
 
     st.markdown("#### Taux de service par Catégorie GLPI")
 
-   
+    st.caption(
+        "Taux de service (%) = (Nombre de tickets résolus dans les délais "
+        "/ Nombre total de tickets résolus) × 100 — "
+        "TR = 1 si le ticket est résolu ou clos dans les 24h, sinon 0."
+    )
 
     done_df = filtered[
         filtered["Statut GLPI"].str.lower().isin(DONE_STATUS)
@@ -1143,6 +1147,44 @@ if page == "Dashboard":
 
         with t2:
             st.dataframe(ts, use_container_width=True, hide_index=True)
+
+    else:
+        st.info("Aucun ticket résolu ou clos avec ces filtres.")
+
+    # --------------------------------------------------------
+    # Taux de service par Technicien
+    # --------------------------------------------------------
+    st.divider()
+
+    st.markdown("#### Taux de service par Technicien")
+
+    if tot_done:
+
+        tt = (
+            done_df.groupby("Technicien")
+            .agg(**{
+                "Résolus + clos": ("id", "count"),
+                "Dans les délais (TR=1)": ("TR", "sum"),
+            })
+            .reset_index()
+        )
+
+        tt["Taux de service (%)"] = (
+            tt["Dans les délais (TR=1)"] / tt["Résolus + clos"] * 100
+        ).round(1)
+
+        tt = tt.sort_values("Taux de service (%)", ascending=False)
+
+        u1, u2 = st.columns([3, 2])
+
+        with u1:
+            st.bar_chart(
+                tt.set_index("Technicien")["Taux de service (%)"],
+                horizontal=True
+            )
+
+        with u2:
+            st.dataframe(tt, use_container_width=True, hide_index=True)
 
     else:
         st.info("Aucun ticket résolu ou clos avec ces filtres.")
