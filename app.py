@@ -41,6 +41,9 @@ DEFAULT_MASTER = APP_DIR / "BKFI_AMOA_suivi GLPI.xlsx"
 
 RAW_PREFIX = "Brut · "
 
+# Statuts considérés comme « terminés » (pour le taux de service)
+DONE_STATUS = ["résolu", "resolu", "clos", "closed", "fermé"]
+
 st.set_page_config(
     page_title="BKFI AMOA — GLPI Weekly",
     layout="wide",
@@ -917,6 +920,46 @@ for _c in ["Statut GLPI", "Catégorie GLPI", "Priorité", "Catégorie"]:
 
 
 # -----------------------------
+# TR : 1 si résolu/clos dans les 24h, sinon 0
+# -----------------------------
+
+def _find_raw(*keys):
+    """Retrouve une colonne brute GLPI dont le nom contient un des mots-clés."""
+    for c in RAW_COLS:
+        name = c.replace(RAW_PREFIX, "", 1).lower()
+        if any(k in name for k in keys):
+            return c
+    return None
+
+
+def _to_dt(s):
+    return pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+
+_c_res = _find_raw("résolution", "resolution")
+_c_clo = _find_raw("clôture", "cloture")
+
+_ouv = _to_dt(df["date_ouverture"])
+
+# Date de fin = date de résolution, sinon date de clôture,
+# sinon dernière modification (moins précis)
+_fin = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+for _c in (_c_res, _c_clo):
+    if _c:
+        _fin = _fin.fillna(_to_dt(df[_c]))
+_fin = _fin.fillna(_to_dt(df["derniere_modif"]))
+
+_done = df["Statut GLPI"].str.lower().isin(DONE_STATUS)
+
+df["TR"] = (
+    _done
+    & _ouv.notna()
+    & _fin.notna()
+    & ((_fin - _ouv) <= pd.Timedelta(hours=24))
+).astype(int)
+
+
+# -----------------------------
 # Common filters
 # -----------------------------
 
@@ -1043,6 +1086,71 @@ if page == "Dashboard":
             horizontal=True
         )
 
+    # --------------------------------------------------------
+    # Taux de service par Catégorie GLPI
+    # Taux de service (%) = (résolus/clos dans les 24h / total résolus/clos) × 100
+    # --------------------------------------------------------
+    st.divider()
+
+    st.markdown("#### Taux de service par Catégorie GLPI")
+
+    st.caption(
+        "Taux de service (%) = (Nombre de tickets résolus dans les délais "
+        "/ Nombre total de tickets résolus) × 100 — "
+        "TR = 1 si le ticket est résolu ou clos dans les 24h, sinon 0."
+    )
+
+    done_df = filtered[
+        filtered["Statut GLPI"].str.lower().isin(DONE_STATUS)
+    ].copy()
+
+    done_df["Catégorie GLPI"] = done_df["Catégorie GLPI"].replace("", "Non catégorisé")
+
+    tot_done = len(done_df)
+    tot_tr = int(done_df["TR"].sum())
+
+    k1, k2, k3 = st.columns(3)
+
+    k1.metric("Tickets résolus + clos", tot_done)
+
+    k2.metric("Dans les délais 24h (TR = 1)", tot_tr)
+
+    k3.metric(
+        "Taux de service global",
+        f"{(tot_tr / tot_done * 100):.1f} %" if tot_done else "—"
+    )
+
+    if tot_done:
+
+        ts = (
+            done_df.groupby("Catégorie GLPI")
+            .agg(**{
+                "Résolus + clos": ("id", "count"),
+                "Dans les délais (TR=1)": ("TR", "sum"),
+            })
+            .reset_index()
+        )
+
+        ts["Taux de service (%)"] = (
+            ts["Dans les délais (TR=1)"] / ts["Résolus + clos"] * 100
+        ).round(1)
+
+        ts = ts.sort_values("Taux de service (%)", ascending=False)
+
+        t1, t2 = st.columns([3, 2])
+
+        with t1:
+            st.bar_chart(
+                ts.set_index("Catégorie GLPI")["Taux de service (%)"],
+                horizontal=True
+            )
+
+        with t2:
+            st.dataframe(ts, use_container_width=True, hide_index=True)
+
+    else:
+        st.info("Aucun ticket résolu ou clos avec ces filtres.")
+
 
 # ============================================================
 # ACTION LOG
@@ -1070,7 +1178,8 @@ elif page == "Action Log":
         "Statut opérationnel": "statut_operationnel",
         "Dernière modification": "derniere_modif",
         "Date clôture": "date_cloture",
-        "Commentaire": "commentaire"
+        "Commentaire": "commentaire",
+        "TR": "TR"
     }
 
     # Toutes les colonnes brutes du fichier GLPI
@@ -1091,7 +1200,8 @@ elif page == "Action Log":
             "Technicien",
             "Deadline",
             "Statut GLPI",
-            "Statut opérationnel"
+            "Statut opérationnel",
+            "TR"
         ]
     )
 
@@ -1133,7 +1243,8 @@ elif page == "Analyse TCD":
         "Description",
         "demandeur",
         "entite",
-        "statut_operationnel"
+        "statut_operationnel",
+        "TR"
     ] + RAW_COLS
 
     rows = st.multiselect(
@@ -1236,6 +1347,7 @@ elif page == "Tickets":
         st.write("**Catégorie retenue :**", r["Catégorie"])
         st.write("**Demandeur :**", r["demandeur"])
         st.write("**Technicien GLPI :**", r["Technicien"])
+        st.write("**TR (résolu/clos < 24h) :**", int(r["TR"]))
 
     with right:
         st.write("**Action :**", r["action"])
